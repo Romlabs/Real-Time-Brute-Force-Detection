@@ -321,7 +321,7 @@ with tab_data:
             st.subheader("session_duration outliers (IQR)")
             out = bfd.iqr_outliers(clean_df["session_duration"])
             fig, ax = plt.subplots(figsize=(6, 3))
-            ax.boxplot(clean_df["session_duration"].dropna(), vert=False)
+            sns.boxplot(x=clean_df["session_duration"].dropna(), ax=ax)
             ax.set_xlabel("session_duration")
             show_fig(fig)
             st.write(f"Bounds: **{out['lower']:.1f}** to **{out['upper']:.1f}** | "
@@ -365,10 +365,15 @@ with tab_train:
                     search_iterations=search_iter, cv_folds=cv_folds,
                 )
                 st.session_state["model_source"] = "Trained in this session"
+                st.session_state.pop("model_bytes", None)
             st.success("Done - open the Performance tab to see the results.")
             st.rerun()
 
         if trained is not None:
-            st.download_button("💾 Download current model (.joblib)",
-                               data=bfd.export_model_bytes(trained),
-                               file_name="brute_force_model.joblib")
+            # Serializing the model is heavy, so only do it when asked (not on every rerun).
+            if st.button("Prepare model file for download"):
+                st.session_state["model_bytes"] = bfd.export_model_bytes(trained)
+            if "model_bytes" in st.session_state:
+                st.download_button("💾 Download model (.joblib)",
+                                   data=st.session_state["model_bytes"],
+                                   file_name="brute_force_model.joblib")

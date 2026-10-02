@@ -9,8 +9,6 @@ Streamlit GUI (app.py) can call it:
     load -> clean -> encode -> split -> (SMOTE) -> scale -> train/tune -> evaluate -> predict
 """
 
-from __future__ import annotations
-
 import io
 import os
 from dataclasses import dataclass, field
