@@ -26,9 +26,11 @@ from sklearn.metrics import (
     average_precision_score,
     confusion_matrix,
     f1_score,
+    precision_recall_curve,
     precision_score,
     recall_score,
     roc_auc_score,
+    roc_curve,
 )
 from sklearn.model_selection import RandomizedSearchCV, train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -163,6 +165,10 @@ class TrainedModel:
     best_params: dict = field(default_factory=dict)
     cv_score: float | None = None
     train_class_counts: dict = field(default_factory=dict)
+    # Held-out test data, kept so the app can draw curves and replay sessions
+    y_test: np.ndarray | None = None
+    y_proba: np.ndarray | None = None
+    test_sessions: pd.DataFrame | None = None
 
 
 def train_model(
@@ -260,13 +266,16 @@ def train_model(
         best_params=best_params,
         cv_score=cv_score,
         train_class_counts={int(k): int(v) for k, v in y_train.value_counts().items()},
+        y_test=y_test.to_numpy(),
+        y_proba=y_proba,
+        test_sessions=clean_df.loc[X_test.index, FEATURE_COLUMNS + [TARGET]].reset_index(drop=True),
     )
 
 
 # --------------------------------------------------------------------------
 # Inference
 # --------------------------------------------------------------------------
-def predict(trained: TrainedModel, sessions: pd.DataFrame) -> pd.DataFrame:
+def predict(trained: TrainedModel, sessions: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
     """Score one or more sessions. Returns a copy with attack probability + label."""
     missing = validate_columns(sessions, need_target=False)
     if missing:
@@ -282,7 +291,7 @@ def predict(trained: TrainedModel, sessions: pd.DataFrame) -> pd.DataFrame:
 
     result = sessions.copy()
     result["attack_probability"] = proba
-    result["prediction"] = np.where(proba >= 0.5, "ATTACK", "Normal")
+    result["prediction"] = np.where(proba >= threshold, "ATTACK", "Normal")
     return result
 
 
@@ -291,3 +300,57 @@ def export_model_bytes(trained: TrainedModel) -> bytes:
     buf = io.BytesIO()
     joblib.dump(trained, buf)
     return buf.getvalue()
+
+
+# --------------------------------------------------------------------------
+# Threshold analysis, persistence, and live-stream simulation
+# --------------------------------------------------------------------------
+def metrics_at_threshold(y_true, y_proba, threshold: float = 0.5) -> dict:
+    """Classification metrics and confusion counts for a chosen alert threshold."""
+    y_true = np.asarray(y_true)
+    y_pred = (np.asarray(y_proba) >= threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+    return {
+        "Accuracy": accuracy_score(y_true, y_pred),
+        "Precision": precision_score(y_true, y_pred, zero_division=0),
+        "Recall": recall_score(y_true, y_pred, zero_division=0),
+        "F1 Score": f1_score(y_true, y_pred, zero_division=0),
+        "FPR": fp / (fp + tn) if (fp + tn) else 0.0,
+        "TP": int(tp), "FP": int(fp), "FN": int(fn), "TN": int(tn),
+        "confusion": np.array([[tn, fp], [fn, tp]]),
+    }
+
+
+def roc_pr_curves(y_true, y_proba) -> dict:
+    """ROC and precision-recall curve data."""
+    fpr, tpr, _ = roc_curve(y_true, y_proba)
+    precision, recall, _ = precision_recall_curve(y_true, y_proba)
+    return {
+        "fpr": fpr, "tpr": tpr, "roc_auc": roc_auc_score(y_true, y_proba),
+        "precision": precision, "recall": recall,
+        "pr_auc": average_precision_score(y_true, y_proba),
+    }
+
+
+def save_model(trained: TrainedModel, path: str) -> int:
+    """Save the trained pipeline to disk (compressed). Returns file size in bytes."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    joblib.dump(trained, path, compress=3)
+    return os.path.getsize(path)
+
+
+def load_model(path: str) -> TrainedModel:
+    """Load a pipeline saved with save_model()."""
+    return joblib.load(path)
+
+
+def simulate_stream(trained: TrainedModel, n: int = 60, threshold: float = 0.5,
+                    seed: int | None = None) -> pd.DataFrame:
+    """Sample n held-out test sessions the model never trained on and score them."""
+    if trained.test_sessions is None:
+        raise ValueError("This model has no stored test sessions.")
+    sample = trained.test_sessions.sample(n=min(n, len(trained.test_sessions)),
+                                          random_state=seed).reset_index(drop=True)
+    scored = predict(trained, sample.drop(columns=[TARGET]), threshold=threshold)
+    scored["actual"] = sample[TARGET].astype(int).values
+    return scored
